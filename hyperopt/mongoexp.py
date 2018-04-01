@@ -174,113 +174,13 @@ def read_pw():
     return open(os.path.join(os.getenv('HOME'), ".hyperopt")).read()[:-1]
 
 
-def parse_url(url, pwfile=None):
-    """Unpacks a url of the form
-        protocol://[username[:pw]]@hostname[:port]/db/collection
-
-    :rtype: tuple of strings
-    :returns: protocol, username, password, hostname, port, dbname, collection
-
-    :note:
-    If the password is not given in the url but the username is, then
-    this function will read the password from file by calling
-    ``open(pwfile).read()[:-1]``
-
-    """
-
-    protocol = url[:url.find(':')]
-    ftp_url = 'ftp' + url[url.find(':'):]
-
-    # -- parse the string as if it were an ftp address
-    tmp = urllib.parse.urlparse(ftp_url)
-    query_params = urllib.parse.parse_qs(tmp.query)
-
-    logger.info('PROTOCOL %s' % protocol)
-    logger.info('USERNAME %s' % tmp.username)
-    logger.info('HOSTNAME %s' % tmp.hostname)
-    logger.info('PORT %s' % tmp.port)
-    logger.info('PATH %s' % tmp.path)
-    
-    authdbname = None
-    if 'authSource' in query_params and len(query_params['authSource']):
-        authdbname = query_params['authSource'][-1]
-        
-    logger.info('AUTH DB %s' % authdbname)
-    
-    try:
-        _, dbname, collection = tmp.path.split('/')
-    except:
-        print("Failed to parse '%s'" % (str(tmp.path)), file=sys.stderr)
-        raise
-    logger.info('DB %s' % dbname)
-    logger.info('COLLECTION %s' % collection)
-
-    if tmp.password is None:
-        if (tmp.username is not None) and pwfile:
-            password = open(pwfile).read()[:-1]
-        else:
-            password = None
-    else:
-        password = tmp.password
-    logger.info('PASS %s' % password)
-    port = int(float(tmp.port))  # port has to be casted explicitly here.
-
-    return (protocol, tmp.username, password, tmp.hostname, port, dbname, collection, authdbname)
-
-
-def connection_with_tunnel(dbname, host='localhost',
-                           auth_dbname=None, port=27017,
-                           ssh=False, user='hyperopt', pw=None):
-    if ssh:
-        local_port = numpy.random.randint(low=27500, high=28000)
-        # -- forward from local to remote machine
-        ssh_tunnel = subprocess.Popen(
-            ['ssh', '-NTf', '-L',
-                    '%i:%s:%i' % (local_port, '127.0.0.1', port),
-                    host],
-        )
-        # -- give the subprocess time to set up
-        time.sleep(.5)
-        connection = pymongo.MongoClient('127.0.0.1', local_port,
-                                         document_class=SON, w=1, j=True)
-    else:
-        connection = pymongo.MongoClient(host, port, document_class=SON, w=1, j=True)
-        if user:
-            if not pw:
-                pw = read_pw()
-                
-            if user == 'hyperopt' and not auth_dbname:
-                auth_dbname = 'admin'
-                    
-            connection[dbname].authenticate(user, pw, source=auth_dbname)
-            
-        ssh_tunnel = None
-
-    # Note that the w=1 and j=True args to MongoClient above should:
-    # -- Ensure that changes are written to at least one server.
-    # -- Ensure that changes are written to the journal if there is one.
-
-    return connection, ssh_tunnel
-
-
 def connection_from_string(s):
-    protocol, user, pw, host, port, db, collection, authdb = parse_url(s)
-    if protocol == 'mongo':
-        ssh = False
-    elif protocol in ('mongo+ssh', 'ssh+mongo'):
-        ssh = True
-    else:
-        raise ValueError('unrecognized protocol for MongoJobs', protocol)
-    connection, tunnel = connection_with_tunnel(
-        dbname=db,
-        ssh=ssh,
-        user=user,
-        pw=pw,
-        host=host,
-        port=port,
-        auth_dbname=authdb
-    )
-    return connection, tunnel, connection[db], connection[db][collection]
+    print('connecting to: %s ...' % s)
+    protocol, _, url, db, collection = s.split('/')
+    print('connection established.')
+    connection = pymongo.MongoClient('%s//%s' % (protocol, url), document_class=SON, w=1, j=True)
+    return connection, None, connection[db], connection[db][collection]
+
 
 
 class MongoJobs(object):
@@ -333,16 +233,6 @@ class MongoJobs(object):
 
     # TODO: rename jobs -> coll throughout
     coll = property(lambda s: s.jobs)
-
-    @classmethod
-    def alloc(cls, dbname, host='localhost',
-              auth_dbname='admin', port=27017,
-              jobs_coll='jobs', gfs_coll='fs', ssh=False, user=None, pw=None):
-        connection, tunnel = connection_with_tunnel(
-            dbname, host, auth_dbname, port, ssh, user, pw)
-        db = connection[dbname]
-        gfs = gridfs.GridFS(db, collection=gfs_coll)
-        return cls(db, db[jobs_coll], gfs, connection, tunnel)
 
     @classmethod
     def new_from_connection_str(cls, conn_str, gfs_coll='fs', config_name='spec'):
@@ -1245,7 +1135,7 @@ def main_worker_helper(options, args):
         # XXX: the name of the jobs collection is a parameter elsewhere,
         #      so '/jobs' should not be hard-coded here
         mj = MongoJobs.new_from_connection_str(
-            as_mongo_str(options.mongo) + '/jobs')
+            options.mongo)
 
         mworker = MongoWorker(mj,
                               float(options.poll_interval),
